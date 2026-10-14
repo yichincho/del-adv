@@ -34,9 +34,11 @@
 - API Key 存在 App 私有儲存（`allowBackup=false`），只送往 `api.typesafe.ai`。
 
 ## 取得 APK（雲端編譯，不需本機 Android Studio）
-1. GitHub repo → **Actions** → 「Android APK」→ 點最新一次成功（綠勾）的執行。
-2. 頁面底部 Artifacts 下載 `del-adv-debug-apk`（zip 內含 APK 與 `SHA256SUMS.txt`）。
-3. 傳到手機安裝（需允許「安裝未知來源 App」）。
+**直接下載最新版：<https://github.com/yichincho/del-adv/releases/latest/download/del-adv.apk>**
+
+1. 用手機瀏覽器開上面的連結，下載後點開安裝（需允許「安裝未知來源 App」）。
+2. 每次推到 `main`，GitHub Actions 會跑測試、編譯，並自動發佈新的 Release；連結永遠指向最新版。
+3. 所有版本與 SHA256：<https://github.com/yichincho/del-adv/releases>
 4. 這是 debug 簽章，每次雲端編譯的簽章不同：**升級前要先解除安裝舊版**。
 
 ## 實機驗收步驟（小米）
