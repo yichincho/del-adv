@@ -85,22 +85,40 @@ class DiscoverService : AccessibilityService() {
             return
         }
         val screen = resources.displayMetrics
-        val ads = linkedMapOf<String, Rect>()
+        val ads = linkedMapOf<String, Mask>()
         val scan = AdScanner(screen.widthPixels, screen.heightPixels)
         val dump = if (DiagnosticLog.armed) StringBuilder() else null
         for (root in roots) {
-            try {
-                scan.walk(root, dump).forEach { area ->
-                    if (ads.values.none { Rect.intersects(it, area) }) {
-                        ads["${area.left}:${area.top}:${area.width()}:${area.height()}"] = area
-                    }
-                }
-            } finally {
-                root.recycle()
+            try { scan.walk(root, dump) } finally { root.recycle() }
+        }
+        scan.finish()
+
+        fun add(area: Rect, mask: Mask) {
+            if (ads.values.none { Rect.intersects(it.area, area) }) {
+                ads["${area.left}:${area.top}:${area.width()}:${area.height()}"] = mask
             }
         }
+        val cache = JevClassifier.cache(this)
+        val toJudge = mutableListOf<CardInfo>()
+        var byJev = 0
+        for (card in scan.cards) {
+            if (card.editable) continue // never describe anything the user can type into
+            val entry = cache.get(card.info.fp)
+            if (entry != null && entry.pinned && !entry.hide) continue // user said "not an ad"
+            when {
+                card.info.labelHit -> add(card.bounds, Mask(card.bounds, card.info.fp, "贊助標籤"))
+                entry?.hide == true -> { add(card.bounds, Mask(card.bounds, card.info.fp, "AI 判定")); byJev++ }
+                entry == null -> toJudge.add(card.info)
+            }
+        }
+        for (r in scan.labelOnly) add(r, Mask(r, null, "贊助標籤"))
+        if (toJudge.isNotEmpty()) {
+            JevClassifier.classify(this, toJudge) { handler.post { handler.removeCallbacks(refreshTask); refresh() } }
+        }
+
         if (dump != null) {
-            dump.append("偵測到 ${scan.labelHits} 個廣告標籤，可遮罩 ${ads.size} 個區域\n")
+            dump.append("偵測到 ${scan.labelHits} 個廣告標籤；動態牆卡片 ${scan.cards.size} 張；")
+            dump.append("可遮罩 ${ads.size} 個區域（AI 判定 $byJev）；待 AI 判定 ${toJudge.size}\n")
             DiagnosticLog.write(this, dump.toString())
         }
         DiagnosticLog.counters(this, scan.labelHits, ads.size)
@@ -111,19 +129,23 @@ class DiscoverService : AccessibilityService() {
             lastSignature = signature
         }
         (overlays.keys - ads.keys).toList().forEach(::removeOverlay)
-        for ((key, area) in ads) {
+        for ((key, mask) in ads) {
             if (key !in dismissed) {
                 val existing = overlays[key]
-                if (existing == null) showOverlay(key, area) else existing.visibility = View.VISIBLE
+                if (existing == null) showOverlay(key, mask) else existing.visibility = View.VISIBLE
             }
         }
         handler.removeCallbacks(watchdog)
         if (overlays.isNotEmpty()) handler.postDelayed(watchdog, WATCHDOG_MS)
     }
 
-    private fun showOverlay(key: String, area: Rect) {
+    private class Mask(val area: Rect, val fp: String?, val source: String)
+
+    private fun showOverlay(key: String, mask: Mask) {
+        val area = mask.area
         val cover = TextView(this).apply {
-            text = "🛡 已遮罩贊助內容\n點此暫時顯示"
+            text = "🛡 已遮罩贊助內容（${mask.source}）\n點一下暫時顯示" +
+                if (mask.fp != null) "・長按標記「不是廣告」" else ""
             textSize = 14f
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
@@ -131,6 +153,14 @@ class DiscoverService : AccessibilityService() {
             setOnClickListener {
                 dismissed.add(key)
                 removeOverlay(key)
+            }
+            mask.fp?.let { fp ->
+                setOnLongClickListener {
+                    JevClassifier.pinSafe(this@DiscoverService, fp)
+                    dismissed.add(key)
+                    removeOverlay(key)
+                    true
+                }
             }
         }
         val params = WindowManager.LayoutParams(

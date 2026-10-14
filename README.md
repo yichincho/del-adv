@@ -1,6 +1,6 @@
 # del-adv — Android Google Discover 廣告遮罩
 
-**狀態：v0.3.0。APK 由 GitHub Actions 雲端編譯（見下方「取得 APK」）；尚未在小米實機驗證。**
+**狀態：v0.4.0。APK 由 GitHub Actions 雲端編譯（見下方「取得 APK」）；尚未在小米實機驗證。**
 
 這個專案目標是手機桌面向左滑的 **Google Discover 新聞資訊流**，不是瀏覽器擴充功能。
 
@@ -16,8 +16,22 @@
 1. **不能真正從其他 App 移除卡片或重新排版**：Android 一般 App 沒有修改 Google App UI tree 的權限；本方法只能遮罩。遮罩可能只是覆蓋標籤，無法正確定位整張卡。
 2. Google Discover 的介面與可見的無障礙樹因手機型號、Android/Google App 版本、語系而異。**目前沒有實機數據驗證效果**。
 3. 如需真正將卡片移除，有現成參考 [hxreborn/discover-ads-filter](https://github.com/hxreborn/discover-ads-filter)，但它依賴 LSPosed，不適用一般未 Root 的手機。
-4. **TypeSafe API Key/AI 判定尚未整合進 Android**：先確認原生可讀到廣告標籤，避免上傳私人新聞卡文字造成不必要的風險；下一階段可加入可選 TypeSafe Jev 並加上限流、快取、敏感資料排除、明確告知。
+4. **TypeSafe Jev AI 判定為選用功能**（見下方「AI 判定」），預設關閉；不開啟時沒有任何資料離開手機。
 5. Android Accessibility 服務對資訊有較高權限，請只從信任的原始碼編譯、明確同意後才啟用。上架 Play Store 須遵守其無障礙政策。
+
+## AI 判定：TypeSafe Jev（選用，預設關閉）
+
+架構移植自 [fazlerocks/jev-adblock](https://github.com/fazlerocks/jev-adblock)（MIT），API 用法同 [realZachi/typesafe-adblock](https://github.com/realZachi/typesafe-adblock) 與官方 [typesafe-sdk-js](https://github.com/typesafe-ai/typesafe-sdk-js)：
+
+- 兩層判定：
+  1. **本機規則**（免費、不連網）：卡片內有「贊助／廣告／Sponsored」標籤 → 直接遮罩。
+  2. **Jev**：沒有標籤的動態牆卡片，整批送 `POST https://api.typesafe.ai/v1/systemone`（`jev-latest`）。每張卡一個 `choice` 問題，選項為 `sponsored_ad / news_article / google_promo / feed_ui`。
+- 門檻由程式掌握：`sponsored_ad ≥ 0.8`、比其他類別合計高 `0.35`、`confidence ≥ 0.4` 才遮罩（`JevConfig`）。
+- 結果依卡片指紋（本機 SHA-256）快取 7 天，同一張卡不重送。長按遮罩可標記「不是廣告」並永久記住。
+- 每日 token 預算 200k（約 US$0.008）。API 連續失敗 5 次就暫停 5 分鐘；Key 無效時停止送出。**任何錯誤一律不遮罩（fail open）**。
+- 送出前提：已填 API Key、已勾選資料揭露同意、已開啟「啟用 AI 判定」。三者缺一，什麼都不送。
+- 送出內容：每張卡最多 150 字文字（標題、來源）、尺寸、元件 id、圖片數、本機訊號。含可輸入欄位的卡片永不描述。不送網址、截圖或帳號。
+- API Key 存在 App 私有儲存（`allowBackup=false`），只送往 `api.typesafe.ai`。
 
 ## 取得 APK（雲端編譯，不需本機 Android Studio）
 1. GitHub repo → **Actions** → 「Android APK」→ 點最新一次成功（綠勾）的執行。
