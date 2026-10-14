@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.view.Gravity
@@ -11,6 +12,7 @@ import android.view.View
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.widget.TextView
 
 /**
@@ -20,80 +22,89 @@ import android.widget.TextView
  *
  * Android cannot remove another app's card from its layout. Only reversible overlays
  * are possible here. If the card bounds cannot be reliably established, do nothing.
+ *
+ * On launcher "minus one" screens (Xiaomi, Pixel) Discover is a Google App window drawn
+ * over the launcher, so the *active* window is usually the launcher. We therefore scan
+ * all interactive windows and only read the ones owned by the Google App.
  */
 class DiscoverService : AccessibilityService() {
-    private val googlePackage = "com.google.android.googlequicksearchbox"
     private val manager by lazy { getSystemService(WINDOW_SERVICE) as WindowManager }
     private val handler = Handler(Looper.getMainLooper())
     private val overlays = mutableMapOf<String, View>()
     private val dismissed = mutableSetOf<String>()
     private var lastSignature = ""
-    private val sponsoredLabel = Regex(
-        "^(廣告|贊助|贊助內容|廣告內容|sponsored|sponsored content|ad|advertisement|promoted)$",
-        RegexOption.IGNORE_CASE
-    )
     private val refreshTask = Runnable { refresh() }
+    // Events are package-filtered, so leaving Google App produces no event. While overlays
+    // are visible, poll the window list and remove them as soon as Discover is gone.
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (overlays.isEmpty()) return
+            if (googleWindowRoots().also { roots -> roots.forEach { it.recycle() } }.isEmpty()) clear()
+            else handler.postDelayed(this, WATCHDOG_MS)
+        }
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        DiagnosticLog.status(this, "服務已連線 ${Build.MANUFACTURER} ${Build.MODEL} SDK ${Build.VERSION.SDK_INT}")
+    }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.packageName?.toString() != googlePackage) {
+        if (event == null) return
+        if (!Prefs.enabled(this)) {
             clear()
             return
         }
-        if (!getSharedPreferences("settings", MODE_PRIVATE).getBoolean("enabled", true)) {
-            clear()
-            return
-        }
+        // Content moves while scrolling; a stale overlay would cover the wrong card.
+        if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) hideAll()
         handler.removeCallbacks(refreshTask)
-        handler.postDelayed(refreshTask, 400L)
+        handler.postDelayed(refreshTask, Prefs.debounceMs(this))
+    }
+
+    private fun googleWindowRoots(): List<AccessibilityNodeInfo> {
+        val result = mutableListOf<AccessibilityNodeInfo>()
+        val list: List<AccessibilityWindowInfo> = try { windows } catch (_: Exception) { emptyList() }
+        for (window in list) {
+            if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+            val root = window.root ?: continue
+            if (root.packageName?.toString() == GOOGLE_PACKAGE) result.add(root) else root.recycle()
+        }
+        if (result.isEmpty()) {
+            // Fallback for ROMs that do not report interactive windows.
+            rootInActiveWindow?.let {
+                if (it.packageName?.toString() == GOOGLE_PACKAGE) result.add(it) else it.recycle()
+            }
+        }
+        return result
     }
 
     private fun refresh() {
-        val root = rootInActiveWindow ?: run { clear(); return }
-        if (root.packageName?.toString() != googlePackage) {
+        val roots = googleWindowRoots()
+        if (roots.isEmpty()) {
             clear()
             return
         }
         val screen = resources.displayMetrics
         val ads = linkedMapOf<String, Rect>()
-        var visited = 0
-
-        fun find(node: AccessibilityNodeInfo, depth: Int) {
-            if (depth > 28 || ++visited > 1500 || ads.size >= 5) return
-            val text = node.text?.toString()?.trim().orEmpty()
-            val desc = node.contentDescription?.toString()?.trim().orEmpty()
-            if (sponsoredLabel.matches(text) || sponsoredLabel.matches(desc)) {
-                val marker = Rect().also(node::getBoundsInScreen)
-                if (marker.width() > 0 && marker.height() > 0) {
-                    // A bounded card-like ancestor: don't cover the full screen/feed.
-                    var current: AccessibilityNodeInfo = node
-                    var selected: Rect? = null
-                    for (step in 0..3) {
-                        val bounds = Rect().also(current::getBoundsInScreen)
-                        if (bounds.width() in (screen.widthPixels * 0.60).toInt()..screen.widthPixels &&
-                            bounds.height() in 100..(screen.heightPixels * 0.65).toInt() &&
-                            bounds.top >= 0 && bounds.bottom <= screen.heightPixels) {
-                            selected = bounds
-                        }
-                        val parent = current.parent ?: break
-                        if (current !== node) current.recycle()
-                        current = parent
-                    }
-                    if (current !== node) current.recycle()
-                    val area = selected
-                    if (area != null && ads.values.none { Rect.intersects(it, area) }) {
-                        // Location + size are a best-effort identity; no user content leaves device.
-                        val key = "${area.left}:${area.top}:${area.width()}:${area.height()}"
-                        ads[key] = area
+        val scan = AdScanner(screen.widthPixels, screen.heightPixels)
+        val dump = if (DiagnosticLog.armed) StringBuilder() else null
+        for (root in roots) {
+            try {
+                scan.walk(root, dump).forEach { area ->
+                    if (ads.values.none { Rect.intersects(it, area) }) {
+                        ads["${area.left}:${area.top}:${area.width()}:${area.height()}"] = area
                     }
                 }
-            }
-            for (i in 0 until node.childCount) {
-                val child = node.getChild(i) ?: continue
-                try { find(child, depth + 1) } finally { child.recycle() }
+            } finally {
+                root.recycle()
             }
         }
+        if (dump != null) {
+            dump.append("偵測到 ${scan.labelHits} 個廣告標籤，可遮罩 ${ads.size} 個區域\n")
+            DiagnosticLog.write(this, dump.toString())
+        }
+        DiagnosticLog.counters(this, scan.labelHits, ads.size)
 
-        try { find(root, 0) } finally { root.recycle() }
         val signature = ads.keys.joinToString("|")
         if (signature != lastSignature) {
             dismissed.clear()
@@ -101,8 +112,13 @@ class DiscoverService : AccessibilityService() {
         }
         (overlays.keys - ads.keys).toList().forEach(::removeOverlay)
         for ((key, area) in ads) {
-            if (key !in overlays && key !in dismissed) showOverlay(key, area)
+            if (key !in dismissed) {
+                val existing = overlays[key]
+                if (existing == null) showOverlay(key, area) else existing.visibility = View.VISIBLE
+            }
         }
+        handler.removeCallbacks(watchdog)
+        if (overlays.isNotEmpty()) handler.postDelayed(watchdog, WATCHDOG_MS)
     }
 
     private fun showOverlay(key: String, area: Rect) {
@@ -121,12 +137,16 @@ class DiscoverService : AccessibilityService() {
             area.width(), area.height(),
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.LEFT
             x = area.left
             y = area.top
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
         }
         try {
             manager.addView(cover, params)
@@ -136,12 +156,15 @@ class DiscoverService : AccessibilityService() {
         }
     }
 
+    private fun hideAll() = overlays.values.forEach { it.visibility = View.GONE }
+
     private fun removeOverlay(key: String) {
         overlays.remove(key)?.let { try { manager.removeView(it) } catch (_: Exception) {} }
     }
 
     private fun clear() {
         handler.removeCallbacks(refreshTask)
+        handler.removeCallbacks(watchdog)
         overlays.keys.toList().forEach(::removeOverlay)
         dismissed.clear()
         lastSignature = ""
@@ -149,4 +172,9 @@ class DiscoverService : AccessibilityService() {
 
     override fun onInterrupt() = clear()
     override fun onDestroy() { clear(); super.onDestroy() }
+
+    companion object {
+        const val GOOGLE_PACKAGE = "com.google.android.googlequicksearchbox"
+        private const val WATCHDOG_MS = 500L
+    }
 }
