@@ -34,3 +34,11 @@
 npx skills add typesafe-ai/skills --skill typesafe-ai
 ```
 參考 [skill 來源](https://github.com/typesafe-ai/skills/blob/main/skills/typesafe-ai/SKILL.md)。此次已閱讀 skill，但無法確認本環境完成 npm 安裝。
+
+## Xiaomi / Redmi / POCO（無 Root）
+
+在 MIUI / HyperOS 的「設定 → 更多設定 → 無障礙」中，找到已下載服務的 del-adv 並手動同意。不同型號可能位於「設定 → 其他設定」下。再至「應用程式 → del-adv」允許自動啟動／背景執行（若有選項），並將電池策略設為無限制。**不建議用 ADB 自動授權無障礙，也不需要 Root。**
+
+2026-10-14 修正：只處理 Google App package；對事件做 400 ms debounce；尋找保守的完整廣告標籤；從合理大小的卡片容器推測位置；若無可靠矩形不遮罩；同一矩形不重複掛載 overlay；手動點擊可以暫時顯示；離開 Google App 立即撤除。此程式尚未經 Android Studio build / 真機測試。
+
+有些小米手機在省電／清理過程中可能停止無障礙服務；此時要回系統設定檢查，並非程式能無條件自動重啟。參考 [HyperOS Accessibility Guard](https://github.com/haku4130/hyperos-accessibility-guard)。
